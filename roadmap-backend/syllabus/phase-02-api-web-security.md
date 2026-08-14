@@ -959,14 +959,13 @@ func withRetry(ctx context.Context, maxAttempts int, fn func() (*http.Response, 
 		}
 
 		resp, err := fn()
-		if err == nil && resp.StatusCode < 500 {
-			return resp, nil // sukses, atau 4xx yang gak perlu diulang
-		}
-		if err == nil && (resp.StatusCode == http.StatusTooManyRequests) {
-			return resp, nil // biarkan caller baca Retry-After sendiri
+		if err == nil && resp.StatusCode < 500 && resp.StatusCode != http.StatusTooManyRequests {
+			return resp, nil // sukses, atau 4xx (selain 429) yang gak perlu diulang
 		}
 		lastErr = err
 		if err == nil {
+			// termasuk 429 (rate limited oleh partner) -> tetap diulang dengan backoff,
+			// bukan langsung dikembalikan ke caller
 			lastErr = fmt.Errorf("upstream returned status %d", resp.StatusCode)
 		}
 	}
