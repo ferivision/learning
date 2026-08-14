@@ -928,7 +928,18 @@ var googleOAuthConfig = &oauth2.Config{
 
 // Step 1: redirect user ke Google Authorization Server.
 func GoogleLoginHandler(w http.ResponseWriter, r *http.Request) {
-	state := generateRandomState() // simpan di cookie/session, dicocokkan lagi saat callback
+	state := generateRandomState()
+	// simpan state di signed/httpOnly cookie, dicocokkan lagi saat callback buat cegah CSRF
+	http.SetCookie(w, &http.Cookie{
+		Name:     "oauth_state",
+		Value:    state,
+		Path:     "/",
+		MaxAge:   300, // 5 menit, cukup buat durasi login flow
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
 	url := googleOAuthConfig.AuthCodeURL(state)
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
@@ -936,6 +947,15 @@ func GoogleLoginHandler(w http.ResponseWriter, r *http.Request) {
 // Step 2: handle callback, tukar authorization code jadi token.
 func GoogleCallbackHandler(w http.ResponseWriter, r *http.Request) {
 	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state")
+
+	stateCookie, err := r.Cookie("oauth_state")
+	if err != nil || state == "" || stateCookie.Value != state {
+		http.Error(w, "invalid state", http.StatusBadRequest)
+		return
+	}
+	// state cuma dipakai sekali, hapus cookie-nya setelah divalidasi
+	http.SetCookie(w, &http.Cookie{Name: "oauth_state", Value: "", Path: "/", MaxAge: -1})
 
 	token, err := googleOAuthConfig.Exchange(context.Background(), code)
 	if err != nil {
