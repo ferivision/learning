@@ -792,6 +792,69 @@ func CheckoutHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 ```
+Sebagai pembanding, `ProductHandler` dan `CartHandler` (file terpisah, `product_handler.go`) sama sekali gak meng-`import "orderflow/internal/payment"` — inilah yang membuktikan browsing produk & isi keranjang gak ikut terdampak walau circuit breaker checkout lagi OPEN:
+```go
+// product_handler.go
+package handler
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strconv"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+
+	"orderflow/db"
+)
+
+// ProductHandler cuma nyentuh Postgres lewat GetProductByID (Phase 3) --
+// gak ada satu baris pun yang bergantung ke package payment, jadi status
+// circuit breaker checkout (OPEN/CLOSED) sama sekali gak berpengaruh ke sini.
+func ProductHandler(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+		if err != nil {
+			http.Error(w, "invalid product id", http.StatusBadRequest)
+			return
+		}
+
+		product, err := db.GetProductByID(r.Context(), pool, id)
+		if err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if product == nil {
+			http.Error(w, "product not found", http.StatusNotFound)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(product)
+	}
+}
+
+// CartHandler cuma nyentuh Redis (session/cart store) -- sama seperti
+// ProductHandler, gak ada dependency ke package payment sama sekali.
+func CartHandler(rdb *redis.Client) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := r.PathValue("userID")
+
+		val, err := rdb.Get(r.Context(), "cart:"+userID).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if errors.Is(err, redis.Nil) {
+			val = "[]"
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(val))
+	}
+}
+```
 
 ### Contoh Kode — Node.js
 `checkoutHandler` adalah satu-satunya handler yang mengimpor `payment-circuit-breaker`; handler produk/keranjang di file lain sengaja gak menyentuhnya:
