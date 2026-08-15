@@ -751,17 +751,24 @@ function processOrder(order) {
 // (topik 55): tiap "worker" di sini cuma alur async yang mengambil giliran
 // di event loop yang sama. Cocok untuk job yang I/O-bound (misalnya update
 // status ke database), TAPI gak memberi keuntungan CPU paralel untuk job
-// yang CPU-bound berat (butuh worker_threads untuk itu).
-async function processOrdersWorkerPool(jobsQueue, workerCount, onResult) {
-  const workers = Array.from({ length: workerCount }, (_, workerId) => runWorker(jobsQueue, workerId, onResult));
-  await Promise.all(workers);
+// yang CPU-bound berat (butuh worker_threads untuk itu). Mengembalikan
+// Promise yang resolve ke array semua Result setelah jobsQueue ditutup dan
+// SEMUA worker selesai -- meniru `<-chan Result` versi Go (topik 60) yang
+// di-drain caller, hanya saja di sini caller menunggu satu Promise berisi
+// seluruh hasil sekaligus, bukan membaca hasil satu per satu dari channel.
+async function processOrdersWorkerPool(jobsQueue, workerCount) {
+  const perWorkerResults = await Promise.all(
+    Array.from({ length: workerCount }, (_, workerId) => runWorker(jobsQueue, workerId)),
+  );
+  return perWorkerResults.flat();
 }
 
-async function runWorker(jobsQueue, workerId, onResult) {
+async function runWorker(jobsQueue, workerId) {
+  const results = [];
   for (;;) {
     const { value: order, done } = await jobsQueue.pull();
-    if (done) return; // jobsQueue ditutup (graceful shutdown, topik 62) -> worker berhenti
-    onResult(processOrder(order));
+    if (done) return results; // jobsQueue ditutup (graceful shutdown, topik 62) -> worker berhenti
+    results.push(processOrder(order));
   }
 }
 
@@ -1011,12 +1018,20 @@ func GracefulShutdown(ctx context.Context, server *http.Server, pool *WorkerPool
 ```javascript
 // WorkerPool membungkus AsyncQueue jobs (topik 56) dan Promise
 // processOrdersWorkerPool yang sedang berjalan (topik 60), supaya bisa
-// dimatikan dengan rapi lewat gracefulShutdown.
+// dimatikan dengan rapi lewat gracefulShutdown. processOrdersWorkerPool
+// sendiri cuma menerima (jobsQueue, workerCount) dan resolve ke array
+// Result setelah semua worker selesai -- WorkerPool yang menyalurkan tiap
+// Result ke callback onResult (mirip NewWorkerPool versi Go, topik 62),
+// supaya konsumer WorkerPool tetap dapat pola callback yang sama walau
+// processOrdersWorkerPool sendiri berbasis Promise, bukan callback.
 class WorkerPool {
   constructor(workerCount, onResult) {
     this.jobsQueue = new AsyncQueue();
     this._closed = false;
-    this.donePromise = processOrdersWorkerPool(this.jobsQueue, workerCount, onResult);
+    this.donePromise = processOrdersWorkerPool(this.jobsQueue, workerCount).then((results) => {
+      results.forEach(onResult);
+      return results;
+    });
   }
 
   // stop menutup jobsQueue (gak ada job baru masuk) dan menunggu semua
