@@ -256,6 +256,7 @@ metadata:
   namespace: orderflow
   labels:
     app: orderflow-go
+    track: stable
 spec:
   replicas: 3
   strategy:
@@ -266,10 +267,12 @@ spec:
   selector:
     matchLabels:
       app: orderflow-go
+      track: stable
   template:
     metadata:
       labels:
         app: orderflow-go
+        track: stable
     spec:
       serviceAccountName: orderflow-go-sa
       containers:
@@ -288,8 +291,24 @@ spec:
               port: 8080
             periodSeconds: 5
 ```
-Contoh Canary untuk `orderflow-go` — Deployment kedua `orderflow-go-canary` (label `track: canary`) dengan versi baru, Service terpisah yang menyeleksi label itu, dan Ingress canary dengan annotation `nginx.ingress.kubernetes.io/canary-weight` yang mengarahkan 10% traffic dari host `go.orderflow.example.com` (host yang sama dengan `orderflow-go-ingress` di topik 89) ke Service canary ini, sisanya tetap ke `orderflow-go-svc` stabil:
+Contoh Canary untuk `orderflow-go` — Deployment kedua `orderflow-go-canary` (label `track: canary`) dengan versi baru, Service terpisah yang menyeleksi label itu, dan Ingress canary dengan annotation `nginx.ingress.kubernetes.io/canary-weight` yang mengarahkan 10% traffic dari host `go.orderflow.example.com` (host yang sama dengan `orderflow-go-ingress` di topik 89) ke Service canary ini, sisanya tetap ke `orderflow-go-svc` stabil. **Penting**: selector `orderflow-go-svc` (topik 89) harus diperbarui supaya mensyaratkan `track: stable` juga, bukan cuma `app: orderflow-go` — kalau enggak, selector itu inclusive-match dan bakal IKUT menyeleksi Pod canary (yang sama-sama berlabel `app: orderflow-go`) sebagai endpoint, sehingga Pod canary menerima traffic dari dua jalur sekaligus (10% lewat Ingress canary, ditambah sebagian traffic "stabil" lewat Service ini) dan weighted-split 90/10 yang dikira berlaku jadi gak akurat:
 ```yaml
+# orderflow-go-svc.yaml -- update dari topik 89: selector ditambah
+# `track: stable` supaya TIDAK ikut menyeleksi Pod canary di bawah.
+apiVersion: v1
+kind: Service
+metadata:
+  name: orderflow-go-svc
+  namespace: orderflow
+spec:
+  selector:
+    app: orderflow-go
+    track: stable
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
 # orderflow-go-canary-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -362,7 +381,7 @@ spec:
 ```
 
 ### Contoh Kode — Node.js
-Manifest rolling update yang setara untuk `orderflow-node` — `maxUnavailable: 0` juga dipakai, tapi `maxSurge` cukup di angka default (`25%`) karena replika basisnya lebih kecil (2) dibanding `orderflow-go` (3):
+Manifest rolling update yang setara untuk `orderflow-node` — `maxUnavailable: 0` juga dipakai supaya kapasitas gak pernah turun di bawah 2 replika, dan `maxSurge: 1` diset eksplisit (bukan mengandalkan default `25%`) supaya konsisten dengan `orderflow-go`: maksimal 1 Pod ekstra sementara di atas 2 replika normal selagi Pod baru sedang di-bootstrap:
 ```yaml
 # orderflow-node-deployment-rolling.yaml
 apiVersion: apps/v1
@@ -372,6 +391,7 @@ metadata:
   namespace: orderflow
   labels:
     app: orderflow-node
+    track: stable
 spec:
   replicas: 2
   strategy:
@@ -382,10 +402,12 @@ spec:
   selector:
     matchLabels:
       app: orderflow-node
+      track: stable
   template:
     metadata:
       labels:
         app: orderflow-node
+        track: stable
     spec:
       serviceAccountName: orderflow-node-sa
       containers:
@@ -404,8 +426,24 @@ spec:
               port: 3000
             periodSeconds: 5
 ```
-Canary yang setara untuk `orderflow-node` — struktur identik, target port dan host Ingress-nya mengikuti `orderflow-node-svc`/`orderflow-node-ingress` (topik 89):
+Canary yang setara untuk `orderflow-node` — struktur identik, target port dan host Ingress-nya mengikuti `orderflow-node-svc`/`orderflow-node-ingress` (topik 89). Sama seperti `orderflow-go`, selector `orderflow-node-svc` (topik 89) juga harus diperbarui supaya mensyaratkan `track: stable`, kalau enggak Service stabil ini bakal ikut menyeleksi Pod canary yang sama-sama berlabel `app: orderflow-node`:
 ```yaml
+# orderflow-node-svc.yaml -- update dari topik 89: selector ditambah
+# `track: stable` supaya TIDAK ikut menyeleksi Pod canary di bawah.
+apiVersion: v1
+kind: Service
+metadata:
+  name: orderflow-node-svc
+  namespace: orderflow
+spec:
+  selector:
+    app: orderflow-node
+    track: stable
+  ports:
+    - port: 80
+      targetPort: 3000
+  type: ClusterIP
+---
 # orderflow-node-canary-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -481,6 +519,7 @@ spec:
 - Rolling update dengan `maxUnavailable: 0` menjamin kapasitas gak pernah turun, tapi butuh resource ekstra sementara (`maxSurge`) selama rollout, dan tetap mengekspos 100% traffic ke versi baru begitu rollout selesai — kalau bug versi baru cuma muncul di beban produksi nyata, semua traffic sudah lanjut ke versi bermasalah itu sebelum ada kesempatan mundur.
 - Blue-Green butuh 2x kapasitas resource selama masa transisi (blue dan green sama-sama hidup penuh) — lebih mahal dibanding rolling update, dan kalau OrderFlow melakukan migrasi skema database (Phase 3) yang breaking, versi blue dan green harus tetap kompatibel dengan skema yang sama selama keduanya hidup berdampingan.
 - Canary butuh dukungan weighted routing (annotation `nginx.ingress.kubernetes.io/canary-weight` di atas, atau service mesh seperti Istio) — gak semua Ingress controller/cluster mendukungnya; kalau kontrolnya salah dikonfigurasi (misal lupa annotation `canary: "true"`), traffic bisa gak ke-split sama sekali dan seluruhnya tetap ke Deployment stabil, membuat canary terlihat "aman" padahal sebenarnya gak pernah benar-benar dites.
+- Selector Service stabil (`orderflow-go-svc`/`orderflow-node-svc`, topik 89) itu inclusive-match — kalau cuma `app: orderflow-go`/`app: orderflow-node` tanpa disempitkan dengan `track: stable`, Service itu bakal IKUT menyeleksi Pod canary (yang sama-sama berlabel `app: orderflow-go`/`app: orderflow-node`, ditambah `track: canary`) sebagai endpoint-nya. Akibatnya Pod canary menerima traffic dari dua jalur sekaligus (10% lewat Ingress canary + sebagian traffic "stabil" yang harusnya cuma ke versi lama), dan weighted-split 90/10 yang dikira berlaku sebenarnya gak akurat — ini gotcha umum di canary deployment yang gampang kelewat kalau cuma fokus ke Ingress-nya dan lupa ngecek selector Service.
 - Deployment `orderflow-go-canary`/`orderflow-node-canary` berbagi `ConfigMap`/`Secret` yang sama dengan versi stabil (topik 91) — kalau versi canary butuh konfigurasi berbeda (misalnya feature flag baru), harus disiapkan `ConfigMap` terpisah, kalau enggak canary jalan dengan environment yang identik dengan stabil dan gak benar-benar menguji perbedaan konfigurasinya.
 
 ### Kapan Dipakai
