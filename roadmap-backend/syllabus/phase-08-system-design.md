@@ -47,8 +47,10 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	orderdb "orderflow/internal/db"
@@ -98,7 +100,10 @@ func NewPostgresOrderRepository(db *pgxpool.Pool) *PostgresOrderRepository {
 // GetByID ambil order beserta detail tiap item-nya. Baris order & order_items
 // diambil manual, lalu product tiap item di-lookup lewat GetProductByID
 // (topik 25, Phase 3) -- reuse fungsi yang sudah ada apa adanya, gak nulis
-// query product baru di sini.
+// query product baru di sini. Order yang gak ketemu (pgx.ErrNoRows) balikin
+// (nil, nil), sama seperti pola GetProductByID di Phase 3, supaya handler di
+// layer atas bisa bedain "order gak ada" (404) dari error database beneran
+// (500).
 func (r *PostgresOrderRepository) GetByID(ctx context.Context, id int64) (*Order, error) {
 	var o Order
 	err := r.db.QueryRow(ctx,
@@ -106,6 +111,9 @@ func (r *PostgresOrderRepository) GetByID(ctx context.Context, id int64) (*Order
 		id,
 	).Scan(&o.ID, &o.UserID, &o.Status, &o.Total, &o.Version)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("get order %d: %w", id, err)
 	}
 
@@ -154,6 +162,7 @@ func (r *PostgresOrderRepository) Create(ctx context.Context, order *Order) erro
 		items[i] = orderdb.OrderItem{
 			ProductID: item.ProductID,
 			Qty:       item.Qty,
+			Price:     item.Price,
 		}
 	}
 
@@ -284,6 +293,7 @@ class OrderRepository {
     const items = order.items.map((item) => ({
       productId: item.productId,
       qty: item.qty,
+      price: item.price,
     }));
     return createOrder(this.pool, order.userId, items);
   }
