@@ -557,6 +557,8 @@ Distributed lock adalah mekanisme memastikan cuma satu proses/instance yang bole
 ### Kenapa dibutuhkan?
 OrderFlow punya job terjadwal buat stock-reconciliation (mencocokkan stock di database dengan data dari warehouse) yang harus jalan tiap beberapa menit. Karena OrderFlow di-deploy di banyak instance/pod (horizontal scaling, topik 65) dan tiap instance punya scheduler-nya sendiri, tanpa distributed lock, job yang sama bisa jalan bersamaan di beberapa instance sekaligus — menyebabkan double-processing dan race condition di data stock.
 
+Ini sebenarnya bukan masalah baru buat OrderFlow. Di Phase 2, `RateLimitMiddleware`/`rateLimitMiddleware` dan `IdempotencyMiddleware`/`idempotencyMiddleware` sudah lebih dulu memakai Redis sebagai state bersama yang bisa dibaca-tulis semua instance — masing-masing buat menghitung jumlah request per client dan buat menandai request POST mana yang sudah diproses. `AcquireDistributedLock`/`acquireDistributedLock` di bawah ini melanjutkan pola yang sama persis (Redis sebagai titik koordinasi antar instance), cuma tujuannya digeser dari "koordinasi hitungan rate-limit/idempotency" menjadi "koordinasi mutual exclusion" — memastikan cuma satu instance yang boleh pegang giliran jalan.
+
 ### Cara Kerja
 ```
 Instance A               Instance B
