@@ -174,7 +174,30 @@ Traffic dari internet:
 ```
 
 ### Contoh Kode — Go
-Manifest lengkap untuk `orderflow-go`: `Namespace`, `ConfigMap`, `Secret`, `Deployment` (2 container port terpisah, image `orderflow-go`), dan `Service`:
+Sebelum masuk ke `Deployment`, ini contoh `Pod` polos berdiri sendiri (bukan yang dipakai di produksi) — buat menunjukkan langsung apa bedanya dengan Pod yang dibungkus Deployment di bawahnya:
+```yaml
+# orderflow-go-pod-standalone.yaml (ILUSTRASI SAJA -- lihat penjelasan di bawah)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: orderflow-go-standalone
+  namespace: orderflow
+  labels:
+    app: orderflow-go
+spec:
+  serviceAccountName: orderflow-go-sa
+  containers:
+    - name: orderflow-go
+      image: registry.example.com/orderflow-go:1.4.0
+      ports:
+        - containerPort: 8080
+      envFrom:
+        - configMapRef:
+            name: orderflow-go-config
+        - secretRef:
+            name: orderflow-go-secret
+```
+Kalau Pod polos di atas dijalankan langsung (`kubectl apply` tanpa Deployment) dan container-nya crash atau node tempatnya jalan mati, gak ada controller yang bakal membuat ulang Pod itu — dia bakal tetap mati sampai ada manusia yang sadar dan menjalankan ulang manual. Itu sebabnya di praktik nyata OrderFlow (dan hampir semua workload produksi) gak pernah deploy `Pod` polos seperti ini; selalu lewat `Deployment`, yang membungkus template Pod yang sama persis tapi menambahkan self-healing (Pod mati otomatis dibuat ulang) dan pengelolaan banyak replika sekaligus. Manifest lengkap untuk `orderflow-go`: `Namespace`, `ConfigMap`, `Secret`, `Deployment` (2 container port terpisah, image `orderflow-go`), dan `Service`:
 ```yaml
 # namespace.yaml
 apiVersion: v1
@@ -221,6 +244,10 @@ spec:
       labels:
         app: orderflow-go
     spec:
+      # ServiceAccount ini dibuat & diberi izin RBAC-nya di topik 91
+      # (Kubernetes Security) -- tanpa baris ini, Pod akan jalan pakai
+      # ServiceAccount "default" namespace dan RBAC topik 91 gak berlaku sama sekali.
+      serviceAccountName: orderflow-go-sa
       containers:
         - name: orderflow-go
           image: registry.example.com/orderflow-go:1.4.0
@@ -318,6 +345,10 @@ spec:
       labels:
         app: orderflow-node
     spec:
+      # ServiceAccount ini dibuat & diberi izin RBAC-nya di topik 91
+      # (Kubernetes Security) -- tanpa baris ini, Pod akan jalan pakai
+      # ServiceAccount "default" namespace dan RBAC topik 91 gak berlaku sama sekali.
+      serviceAccountName: orderflow-node-sa
       containers:
         - name: orderflow-node
           image: registry.example.com/orderflow-node:1.4.0
@@ -538,7 +569,7 @@ Dengan RBAC + NetworkPolicy diterapkan:
 ```
 
 ### Contoh Kode — Go
-`ServiceAccount`, `Role`, `RoleBinding`, dan `NetworkPolicy` untuk Deployment `orderflow-go` (topik 89) — izin RBAC dibatasi hanya baca ConfigMap/Secret miliknya sendiri, dan traffic keluar dibatasi hanya ke Postgres & Redis:
+`ServiceAccount`, `Role`, `RoleBinding`, dan `NetworkPolicy` untuk Deployment `orderflow-go` (topik 89) — izin RBAC dibatasi hanya baca ConfigMap/Secret miliknya sendiri, dan traffic keluar dibatasi hanya ke Postgres & Redis. `orderflow-go-sa` di bawah ini persis nama yang sudah dirujuk lewat `serviceAccountName: orderflow-go-sa` di pod template Deployment `orderflow-go` (topik 89) -- tanpa Role/RoleBinding di bawah, ServiceAccount ini gak punya izin apa-apa sama sekali (default Kubernetes: deny semua yang gak eksplisit diizinkan):
 ```yaml
 # orderflow-go-serviceaccount.yaml
 apiVersion: v1
@@ -624,7 +655,7 @@ spec:
 ```
 
 ### Contoh Kode — Node.js
-Manifest yang setara untuk `orderflow-node` — nama resource dan `podSelector` merujuk ke Deployment `orderflow-node`, tapi struktur izin RBAC & pembatasan egress-nya identik secara prinsip:
+Manifest yang setara untuk `orderflow-node` — nama resource dan `podSelector` merujuk ke Deployment `orderflow-node`, tapi struktur izin RBAC & pembatasan egress-nya identik secara prinsip. Sama seperti versi Go, `orderflow-node-sa` di bawah ini adalah ServiceAccount yang sama yang sudah dirujuk lewat `serviceAccountName: orderflow-node-sa` di pod template Deployment `orderflow-node` (topik 89):
 ```yaml
 # orderflow-node-serviceaccount.yaml
 apiVersion: v1
