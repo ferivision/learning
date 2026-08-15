@@ -292,7 +292,10 @@ async function publishOrderCreated(producer, order) {
   const event = {
     eventId: crypto.randomUUID(),
     orderId: order.id,
-    userId: order.userId,
+    // createOrder (phase 03) mengembalikan raw row dari
+    // "RETURNING id, user_id, status, total, version" tanpa aliasing, jadi
+    // key-nya snake_case (order.user_id), bukan order.userId.
+    userId: order.user_id,
     total: order.total,
     createdAt: new Date().toISOString(),
   };
@@ -1153,7 +1156,10 @@ function publishOrderCreatedRabbitMQ(channel, order) {
   const event = {
     eventId: crypto.randomUUID(),
     orderId: order.id,
-    userId: order.userId,
+    // createOrder (phase 03) mengembalikan raw row dari
+    // "RETURNING id, user_id, status, total, version" tanpa aliasing, jadi
+    // key-nya snake_case (order.user_id), bukan order.userId.
+    userId: order.user_id,
     total: order.total,
     createdAt: new Date().toISOString(),
   };
