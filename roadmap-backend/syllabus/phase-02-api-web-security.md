@@ -1924,4 +1924,3 @@ Enkripsi data at rest dipakai untuk field sensitif yang memang perlu dibaca ulan
 ---
 
 **Selanjutnya:** [Phase 03 — Database](./phase-03-database.md)
-</content>

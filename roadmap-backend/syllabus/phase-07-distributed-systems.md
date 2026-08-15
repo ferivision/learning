@@ -459,10 +459,14 @@ Data source of truth (misalnya jumlah stock di database order utama) butuh stron
 package handler
 
 import (
-	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"orderflow/internal/auth"
+	orderdb "orderflow/internal/db"
 	"orderflow/internal/queue"
 )
 
@@ -472,47 +476,53 @@ type OrderPlacedEvent struct {
 	Qty       int   `json:"qty"`
 }
 
-// CreateOrder nyimpen order ke database utama (source of truth, strong
-// consistency) lalu publish event ke queue supaya stock count di
-// read-model (cache produk yang dipakai listing) di-update belakangan
-// secara asynchronous — itu sebabnya listing produk bisa kelihatan stock
-// yang sedikit "telat" beberapa saat setelah order dibuat.
-func CreateOrder(publisher queue.Publisher) http.HandlerFunc {
+// CreateOrderHandler nyimpen order ke database utama (source of truth,
+// strong consistency, lewat orderdb.CreateOrder — topik 29, Phase 3) lalu
+// publish event ke queue supaya stock count di read-model (cache produk
+// yang dipakai listing) di-update belakangan secara asynchronous — itu
+// sebabnya listing produk bisa kelihatan stock yang sedikit "telat"
+// beberapa saat setelah order dibuat.
+func CreateOrderHandler(db *pgxpool.Pool, publisher queue.Publisher) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		claims, ok := r.Context().Value(auth.ClaimsContextKey).(*auth.Claims)
+		if !ok {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
 		var req struct {
-			ProductID int64 `json:"product_id"`
-			Qty       int   `json:"qty"`
+			ProductID int64   `json:"product_id"`
+			Qty       int     `json:"qty"`
+			Price     float64 `json:"price"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
 
-		orderID, err := saveOrder(r.Context(), req.ProductID, req.Qty)
+		items := []orderdb.OrderItem{{ProductID: req.ProductID, Qty: req.Qty, Price: req.Price}}
+		order, err := orderdb.CreateOrder(r.Context(), db, claims.UserID, items)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 
-		event, _ := json.Marshal(OrderPlacedEvent{OrderID: orderID, ProductID: req.ProductID, Qty: req.Qty})
+		event, _ := json.Marshal(OrderPlacedEvent{OrderID: order.ID, ProductID: req.ProductID, Qty: req.Qty})
 		if err := publisher.Publish(r.Context(), "order.placed", event); err != nil {
 			// order sudah tersimpan di source of truth; kegagalan publish
 			// event gak boleh menggagalkan response ke user, tapi harus
 			// dicatat/di-retry supaya read-model gak keburu ketinggalan lama.
-			logPublishFailure(err)
+			logPublishFailure(order.ID, err)
 		}
 
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]int64{"order_id": orderID})
+		json.NewEncoder(w).Encode(map[string]int64{"order_id": order.ID})
 	}
 }
 
-func saveOrder(ctx context.Context, productID int64, qty int) (int64, error) {
-	// simpan ke database utama (strong consistency)
-	return 1, nil
+func logPublishFailure(orderID int64, err error) {
+	log.Printf("failed to publish event for order %d: %v", orderID, err)
 }
-
-func logPublishFailure(err error) {}
 ```
 
 ### Contoh Kode — Node.js
