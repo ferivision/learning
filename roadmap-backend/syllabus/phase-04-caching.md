@@ -264,6 +264,7 @@ package db
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
@@ -294,8 +295,10 @@ func CreateOrderInvalidateCache(ctx context.Context, rdb *redis.Client, db *pgxp
 		if err := InvalidateProductCache(ctx, rdb, item.ProductID); err != nil {
 			// Order-nya sendiri sudah sukses -- kegagalan invalidate cache gak
 			// boleh bikin caller mikir order-nya gagal, cukup dicatat/di-retry
-			// di luar (misalnya lewat message queue, Phase 05).
-			return order, fmt.Errorf("order %d created but cache invalidation failed: %w", order.ID, err)
+			// di luar (misalnya lewat message queue, Phase 05). Loop tetap
+			// lanjut ke item berikutnya -- satu item gagal ke-invalidate gak
+			// boleh bikin item lain di order yang sama ikut gak ke-invalidate.
+			log.Printf("order %d created but cache invalidation failed for product %d: %v", order.ID, item.ProductID, err)
 		}
 	}
 	return order, nil
