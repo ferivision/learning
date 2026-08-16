@@ -231,29 +231,37 @@ FastAPI mendukung ini lewat `StreamingResponse`, yang nerima sebuah **async gene
 
 ### Contoh Kode — Python
 
-> **Catatan Python:** `async def` di bawah ini adalah fungsi **asynchronous** — fungsi yang bisa "pause" (berhenti sejenak) saat nunggu operasi I/O (misal nunggu token berikutnya dari LLM provider lewat network), lalu "resume" lagi begitu datanya siap, TANPA memblokir seluruh program buat ikutan nunggu. Ini beda dari fungsi biasa (`def`) yang begitu dipanggil harus selesai dulu sepenuhnya sebelum kode lain bisa jalan.
+> **Catatan Python:** `async def` di bawah ini adalah fungsi **asynchronous** — fungsi yang bisa "pause" (berhenti sejenak) saat nunggu operasi I/O (misal nunggu token berikutnya dari LLM provider lewat network), lalu "resume" lagi begitu datanya siap, TANPA memblokir seluruh program buat ikutan nunggu. Ini beda dari fungsi biasa (`def`) yang begitu dipanggil harus selesai dulu sepenuhnya sebelum kode lain bisa jalan. Supaya manfaat ini beneran kepakai, client yang dipanggil di dalamnya juga harus **async** — makanya di bawah ini kita pakai `AsyncOpenAI` (bukan `OpenAI` biasa yang dipakai `LLMGateway` di topik 20), dan tiap panggilan I/O-nya pakai `await`/`async for`. Kalau tetap pakai client sync di dalam `async def`, fungsinya "keliatan async" tapi tetap ngeblokir event loop selama network call berlangsung — jadi gak dapat manfaat konkurensi yang dijanjikan `async def`.
 >
 > **Catatan Python:** Fungsi ini juga sekaligus sebuah **generator**, ditandai lewat keyword `yield` di dalamnya: alih-alih `return` satu nilai lalu selesai, generator "menghasilkan" (yield) beberapa nilai satu per satu — tiap kali dipanggil lagi, dia lanjut dari titik terakhir dia berhenti. Ini pas banget buat streaming: kita gak punya "satu jawaban lengkap" buat di-`return` sekaligus, yang ada cuma token yang datang satu-satu, dan `yield` memungkinkan tiap token langsung dikirim begitu tersedia.
 
 ```python
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
+from openai import AsyncOpenAI
 import json
 
 app = FastAPI()
 
+# Client async terpisah khusus buat path streaming — beda dari
+# gateway.openai_client (OpenAI sync) yang dipakai LLMGateway.generate()
+# di topik 20. Streaming butuh client async supaya `await` dan `async for`
+# di bawah benar-benar non-blocking terhadap event loop FastAPI.
+async_openai_client = AsyncOpenAI()
+
 
 async def generate_stream(message: str):
     """
-    Async generator: manggil LLM provider dengan stream=True, lalu yield tiap
-    token begitu datang (bukan nunggu jawaban lengkap dulu baru dikirim).
+    Async generator: manggil LLM provider dengan stream=True lewat AsyncOpenAI,
+    lalu yield tiap token begitu datang (bukan nunggu jawaban lengkap dulu
+    baru dikirim).
     """
-    stream = gateway.openai_client.chat.completions.create(
+    stream = await async_openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": message}],
         stream=True,
     )
-    for chunk in stream:
+    async for chunk in stream:
         token = chunk.choices[0].delta.content
         if token:
             # Format SSE: tiap event diawali "data: " dan diakhiri baris kosong
