@@ -353,11 +353,15 @@ Graph sederhana buat SupportPilot: satu node yang mencoba mengekstrak `ticket_id
 from langgraph.graph import StateGraph, END
 from typing import TypedDict
 
+MAX_STEPS = 3  # guard biar loop gak jalan tanpa henti, sama spirit-nya kayak
+               # max_steps di run_agent_loop (topik 25)
+
 
 class AgentState(TypedDict):
     question: str    # pertanyaan customer
     ticket_id: str    # ticket_id yang berhasil diekstrak (kosong kalau belum ketemu)
     answer: str       # jawaban akhir (kosong selama belum final)
+    steps: int        # penghitung iterasi buat MAX_STEPS di atas
 
 
 def extract_or_answer(state: AgentState) -> AgentState:
@@ -366,13 +370,17 @@ def extract_or_answer(state: AgentState) -> AgentState:
     "susun jawaban" masing-masing bisa manggil LLM/tool (get_ticket_status,
     topik 25) — di sini disederhanakan biar fokus ke struktur graph-nya.
     """
+    state["steps"] += 1
+
     if not state["ticket_id"]:
         if "T-" in state["question"]:
             # simulasikan berhasil menemukan ticket_id dari pertanyaan customer
             state["ticket_id"] = "T-" + state["question"].split("T-")[1][:3]
         else:
-            # belum ketemu ticket_id -> answer dibiarkan kosong,
-            # conditional edge di bawah bakal nyuruh balik ke node ini lagi
+            # belum ketemu ticket_id -> answer dibiarkan kosong, conditional edge
+            # di bawah bakal nyuruh balik ke node ini lagi (dibatasi MAX_STEPS,
+            # lihat should_continue, biar gak infinite loop di real case kalau
+            # ticket_id emang gak pernah ketemu)
             return state
 
     state["answer"] = f"Tiket {state['ticket_id']} kamu statusnya sedang diproses."
@@ -380,9 +388,11 @@ def extract_or_answer(state: AgentState) -> AgentState:
 
 
 def should_continue(state: AgentState) -> str:
-    # Conditional edge: kalau jawaban belum final, balik lagi ke node yang sama
-    # (loop); kalau udah final, keluar dari graph
-    return END if state["answer"] else "extract_or_answer"
+    # Conditional edge: kalau jawaban belum final DAN belum mentok MAX_STEPS,
+    # balik lagi ke node yang sama (loop); selain itu keluar dari graph
+    if state["answer"] or state["steps"] >= MAX_STEPS:
+        return END
+    return "extract_or_answer"
 
 
 graph = StateGraph(AgentState)
@@ -392,11 +402,13 @@ graph.add_conditional_edges("extract_or_answer", should_continue)
 
 app = graph.compile()
 result = app.invoke(
-    {"question": "Gimana status tiket T-123 saya?", "ticket_id": "", "answer": ""}
+    {"question": "Gimana status tiket T-123 saya?", "ticket_id": "", "answer": "", "steps": 0}
 )
 print(result["answer"])
 # diharapkan: "Tiket T-123 kamu statusnya sedang diproses."
 ```
+Catatan penting: `MAX_STEPS` di atas bukan sekadar hiasan — tanpa itu, kalau `question`-nya gak pernah mengandung `"T-"`, `state` gak pernah berubah antar iterasi (`ticket_id` dan `answer` tetap kosong selamanya), jadi `should_continue` bakal terus-menerus balik ke `"extract_or_answer"` tanpa henti. `MAX_STEPS` memastikan graph tetap berhenti (dengan `answer` kosong) di kasus edge itu, persis kayak kenapa `run_agent_loop` di topik 25 butuh `max_steps`.
+
 Kenapa ini penting dibanding LangChain biasa (topik 23): agent loop butuh percabangan dan loop yang eksplisit kayak di atas (`should_continue` yang bisa balik ke `"extract_or_answer"` lagi) — sesuatu yang gak natural direpresentasikan sebagai rantai `prompt | model | parser` satu arah.
 
 ### Contoh Kode — Node.js
@@ -404,34 +416,43 @@ Graph yang sama, versi LangGraph JS:
 ```javascript
 import { StateGraph, END } from "@langchain/langgraph";
 
+const MAX_STEPS = 3; // guard biar loop gak jalan tanpa henti, sama spirit-nya
+                      // kayak max_steps di run_agent_loop (topik 25)
+
 const graph = new StateGraph({
   channels: {
     question: null,
     ticketId: null,
     answer: null,
+    steps: null,
   },
 });
 
 function extractOrAnswer(state) {
-  let { question, ticketId, answer } = state;
+  let { question, ticketId, answer, steps } = state;
+  steps = (steps || 0) + 1;
 
   if (!ticketId) {
     if (question.includes("T-")) {
       // simulasikan berhasil menemukan ticketId dari pertanyaan customer
       ticketId = "T-" + question.split("T-")[1].slice(0, 3);
     } else {
-      // belum ketemu ticketId -> answer tetap kosong, conditional edge
-      // bakal nyuruh balik ke node ini lagi
-      return { ticketId, answer: "" };
+      // belum ketemu ticketId -> answer tetap kosong, conditional edge bakal
+      // nyuruh balik ke node ini lagi (dibatasi MAX_STEPS, lihat shouldContinue,
+      // biar gak infinite loop di real case kalau ticketId emang gak pernah ketemu)
+      return { ticketId, answer: "", steps };
     }
   }
 
   answer = `Tiket ${ticketId} kamu statusnya sedang diproses.`;
-  return { ticketId, answer };
+  return { ticketId, answer, steps };
 }
 
 function shouldContinue(state) {
-  return state.answer ? END : "extractOrAnswer";
+  // kalau jawaban belum final DAN belum mentok MAX_STEPS, balik lagi ke node
+  // yang sama (loop); selain itu keluar dari graph
+  if (state.answer || state.steps >= MAX_STEPS) return END;
+  return "extractOrAnswer";
 }
 
 graph.addNode("extractOrAnswer", extractOrAnswer);
@@ -443,16 +464,22 @@ const result = await app.invoke({
   question: "Gimana status tiket T-123 saya?",
   ticketId: "",
   answer: "",
+  steps: 0,
 });
 console.log(result.answer);
 // diharapkan: "Tiket T-123 kamu statusnya sedang diproses."
 ```
+Sama seperti versi Python: tanpa `MAX_STEPS`, kalau `question`-nya gak pernah mengandung `"T-"`, `shouldContinue` bakal terus balik ke `"extractOrAnswer"` tanpa henti karena state gak pernah berubah antar iterasi.
 
 ### Cara Manual (From Scratch) — agent loop tanpa LangGraph
 LangGraph itu intinya cuma **while-loop dengan state dictionary** yang dibungkus rapi. Ini versi manualnya, buat kasus SupportPilot yang sama persis:
 
 **Python (manual, agent loop pakai while-loop biasa):**
 ```python
+MAX_STEPS = 3  # guard biar loop gak jalan tanpa henti, sama spirit-nya kayak
+               # max_steps di run_agent_loop (topik 25)
+
+
 def extract_or_answer_manual(question: str, ticket_id: str) -> tuple[str, str]:
     # Setara node "extract_or_answer" di versi LangGraph
     if not ticket_id:
@@ -474,11 +501,15 @@ def run_agent_manual(question: str) -> str:
     # "state" cuma dictionary biasa, gak ada abstraksi graph
     state = {"question": question, "ticket_id": "", "answer": ""}
 
-    # Ini "graph"-nya: while-loop yang bisa balik lagi kalau task belum selesai
-    while not is_task_done(state["answer"]):
+    # Ini "graph"-nya: while-loop yang bisa balik lagi kalau task belum selesai,
+    # dibatasi MAX_STEPS biar gak infinite loop kalau ticket_id emang gak
+    # pernah ketemu (state gak berubah antar iterasi di kasus itu)
+    steps = 0
+    while not is_task_done(state["answer"]) and steps < MAX_STEPS:
         state["ticket_id"], state["answer"] = extract_or_answer_manual(
             state["question"], state["ticket_id"]
         )
+        steps += 1
         # Kalau butuh multi-node lain (misal panggil tool dulu baru jawab),
         # tinggal tambah percabangan if/elif di sini
 
@@ -492,6 +523,9 @@ print(result)
 
 **Node.js (manual, agent loop pakai while-loop biasa):**
 ```javascript
+const MAX_STEPS = 3; // guard biar loop gak jalan tanpa henti, sama spirit-nya
+                      // kayak max_steps di run_agent_loop (topik 25)
+
 function extractOrAnswerManual(question, ticketId) {
   // Setara node "extractOrAnswer" di versi LangGraph
   if (!ticketId) {
@@ -515,10 +549,14 @@ function runAgentManual(question) {
   // "state" cuma object biasa, gak ada abstraksi graph
   let state = { question, ticketId: "", answer: "" };
 
-  // Ini "graph"-nya: while-loop yang bisa balik lagi kalau task belum selesai
-  while (!isTaskDone(state.answer)) {
+  // Ini "graph"-nya: while-loop yang bisa balik lagi kalau task belum selesai,
+  // dibatasi MAX_STEPS biar gak infinite loop kalau ticketId emang gak
+  // pernah ketemu (state gak berubah antar iterasi di kasus itu)
+  let steps = 0;
+  while (!isTaskDone(state.answer) && steps < MAX_STEPS) {
     const { ticketId, answer } = extractOrAnswerManual(state.question, state.ticketId);
     state = { ...state, ticketId, answer };
+    steps += 1;
     // Kalau butuh multi-node lain (misal panggil tool dulu baru jawab),
     // tinggal tambah percabangan if/else di sini
   }
@@ -535,7 +573,7 @@ console.log(runAgentManual("Gimana status tiket T-123 saya?"));
 ### Trade-off & Pitfall
 - **Overhead belajar tambahan** — konsep `StateGraph`, node, conditional edges, dan `compile()` perlu dipahami dulu sebelum bisa dipakai efektif; buat agent loop yang cuma satu-dua langkah tanpa percabangan (seperti contoh dasar di topik 25), while-loop manual sudah cukup dan lebih transparan.
 - **Debugging graph yang kompleks tetap butuh usaha** — walau state-nya eksplisit dan bisa di-inspect, begitu jumlah node dan conditional edge-nya banyak, menelusuri "kenapa graph ambil jalur ini" tetap butuh effort, gak otomatis jadi simpel cuma karena strukturnya lebih rapi.
-- **Loop yang gak dibatasi tetap bisa jalan tanpa henti** — LangGraph gak otomatis mencegah loop infinite kalau conditional edge-nya gak pernah mengarah ke `END`; sama seperti `max_steps` di `run_agent_loop` (topik 25), batas jumlah iterasi tetap perlu dipikirkan secara eksplisit di logic node/conditional edge-nya.
+- **Loop yang gak dibatasi tetap bisa jalan tanpa henti** — LangGraph gak otomatis mencegah loop infinite kalau conditional edge-nya gak pernah mengarah ke `END`; contoh `extract_or_answer`/`should_continue` di atas sengaja pakai `MAX_STEPS` buat nunjukin ini — tanpa itu, `question` yang gak mengandung `"T-"` bikin state gak pernah berubah antar iterasi dan loop gak pernah konvergen. Sama seperti `max_steps` di `run_agent_loop` (topik 25), batas jumlah iterasi tetap perlu dipikirkan secara eksplisit di logic node/conditional edge-nya.
 - **Versi library yang sering update** — sama seperti LangChain (topik 23), API LangGraph juga berpotensi berubah antar versi rilis, jadi kode yang jalan mulus di satu versi belum tentu jalan sama persis di versi berikutnya.
 
 ### Kapan Dipakai
