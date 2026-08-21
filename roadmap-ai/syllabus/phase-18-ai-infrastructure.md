@@ -137,6 +137,7 @@ gateway = ModelGateway(provider="openai")
 - **Fallback ke model yang lebih murah bisa menurunkan kualitas jawaban** — kalau model utama gagal terus-menerus (bukan cuma sesekali), SupportPilot diam-diam kasih jawaban dari model cadangan yang mungkin gak sekuat model utama, tanpa customer tau ada apa-apa. Perlu ada alerting terpisah kalau fallback kepakai terlalu sering.
 - **`ModelGateway` sekarang jauh lebih rumit dibanding `LLMGateway`** — makin banyak concern (rate limit, fallback, cost tracking, nanti caching & routing) digabung di satu class, makin besar juga risiko satu bug di sini berdampak ke SEMUA request LLM SupportPilot, bukan cuma satu fitur.
 - **`except Exception` di `generate()` cukup lebar** — dia nangkep SEMUA jenis error (timeout, invalid API key, model gak ada, dst) dan langsung fallback tanpa membedakan mana error yang benar-benar transient (layak di-retry/fallback) dan mana yang bakal gagal lagi walau di-fallback (misal format `messages` yang salah).
+- **Fallback bisa jadi no-op kalau `chosen_model` kebetulan sama dengan `fallback_model`** — di atas, kalau pemanggil gak kasih `model` eksplisit, `chosen_model` default-nya `"gpt-4o-mini"` — model yang SAMA PERSIS dengan `fallback_model`. Kalau model itu gagal, "fallback"-nya cuma nge-ulang panggilan yang identik ke model yang barusan gagal, bukan beneran coba model lain — gak ada resilience tambahan sama sekali buat path default ini. Fallback baru kasih manfaat nyata kalau `chosen_model` yang gagal beda dari `fallback_model`.
 
 ### Kapan Dipakai
 - Upgrade dari `LLMGateway` (Phase 5) ke `ModelGateway` begitu SupportPilot mulai punya traffic production nyata dan concern seperti "provider kadang down" atau "jangan sampai kena rate limit provider" jadi masalah sungguhan, bukan cuma teori.
@@ -157,7 +158,7 @@ gateway = ModelGateway(provider="openai")
 Model Routing adalah logic buat milih model yang paling cocok berdasarkan **kompleksitas task**, bukan selalu pakai model yang sama buat semua request:
 ```
 Task simpel               → model murah & cepat   (misal "gpt-4o-mini")
-Reasoning kompleks         → model kuat            (misal "claude-3-5-sonnet-20241022")
+Reasoning kompleks         → model kuat            (misal "gpt-4o")
 Klasifikasi volume tinggi  → model kecil           (misal "gpt-4o-mini")
 ```
 Di `ModelGateway` (topik 68), routing ini diwujudkan lewat method `route(self, task_complexity: str) -> str`, yang dipanggil `generate()` di awal buat nentuin model mana yang benar-benar dipakai.
@@ -186,7 +187,7 @@ MODEL_BY_COMPLEXITY = {
     "simple": "gpt-4o-mini",
     "classification": "gpt-4o-mini",
     "complex": "gpt-4o",
-    "reasoning": "claude-3-5-sonnet-20241022",
+    "reasoning": "gpt-4o",
 }
 
 
@@ -241,7 +242,8 @@ hasil_klasifikasi = gateway.generate(
 
 hasil_analisis = gateway.generate(
     messages=[{"role": "user", "content": "Analisis akar masalah dari 5 tiket refund yang saling berkaitan berikut..."}],
-    task_complexity="reasoning",  # → routed ke "claude-3-5-sonnet-20241022"
+    task_complexity="reasoning",  # → routed ke "gpt-4o" (self.provider gateway ini fixed ke "openai",
+    # jadi route() cuma boleh balikin nama model OpenAI yang valid — lihat Trade-off & Pitfall di bawah)
 )
 ```
 
@@ -250,6 +252,8 @@ hasil_analisis = gateway.generate(
 - **Fallback (topik 68) dan routing bisa saling tabrakan** — kalau task berlabel `"reasoning"` di-route ke model kuat, tapi model itu gagal dan fallback jatuh ke `"gpt-4o-mini"` (model murah), request yang tadinya butuh reasoning kompleks jadi dijawab model yang justru gak cocok buat itu. Versi production biasanya butuh fallback chain yang mempertimbangkan kompleksitas task juga, bukan satu fallback model yang sama buat semua kasus.
 - **Menambah kategori `task_complexity` baru berarti nge-update `MODEL_BY_COMPLEXITY` secara manual** — mapping ini gampang jadi basi kalau ada model baru yang lebih baik/murah rilis dan gak keburu di-update.
 - **Routing berbasis rule sederhana seperti ini gak mempertimbangkan panjang/isi konten pesan** — task yang dilabel `"simple"` tapi ternyata isinya kompleks (misal customer nanya hal simpel tapi dengan konteks yang panjang dan berlapis) tetap bakal di-route ke model kecil, walau sebenarnya butuh model yang lebih kuat.
+- **`route()` di atas cuma boleh balikin nama model yang valid buat provider yang FIXED di instance `ModelGateway` ini** — `_call_provider` (topik 68) dispatch berdasarkan `self.provider` yang di-set sekali di `__init__` (di contoh atas selalu `"openai"`), BUKAN berdasarkan model yang di-balikin `route()`. Makanya `MODEL_BY_COMPLEXITY` di atas sengaja cuma diisi nama model OpenAI (`"gpt-4o-mini"`, `"gpt-4o"`) — kalau salah satu entrinya diisi nama model provider lain (misal model Anthropic), `_call_provider` bakal tetap manggil `self.openai_client` tapi dengan nama model yang gak dikenal OpenAI, request-nya pasti gagal (dan gagal itu ke-tangkep `except Exception` di `generate()`, jadi diam-diam fallback ke `"gpt-4o-mini"` tanpa error yang jelas ke pemanggil). Routing yang beneran lintas PROVIDER (bukan cuma lintas model dalam satu provider) butuh `_call_provider` ikut milih client/provider berdasarkan model hasil `route()`, bukan cuma dispatch tetap ke `self.provider` — itu ekstensi yang valid buat production, tapi di luar scope contoh sederhana di sini.
+- **Fallback jadi no-op nyata justru di path yang paling sering dipakai** — `route()` buat label `"simple"`/`"classification"` balikin `"gpt-4o-mini"`, dan `fallback_model` di `generate()` JUGA `"gpt-4o-mini"` (sama seperti topik 68). Kalau model itu gagal buat task simpel/klasifikasi, "fallback"-nya cuma nge-ulang panggilan ke model yang SAMA PERSIS yang baru gagal — gak ada resilience beneran. Fallback baru beneran ganti model buat path `"complex"`/`"reasoning"` (yang di-route ke `"gpt-4o"`, beda dari `fallback_model`). Supaya fallback efektif di SEMUA path, `fallback_model` idealnya dipilih beda dari SEMUA kemungkinan hasil `route()`, bukan konstanta tunggal yang kebetulan sama dengan salah satu di antaranya.
 
 ### Kapan Dipakai
 - Pakai Model Routing begitu SupportPilot punya BEBERAPA jenis task dengan kompleksitas yang jelas beda-beda (misal klasifikasi tiket vs analisis akar masalah multi-tiket) dan volume request-nya cukup besar sehingga selisih biaya per model jadi signifikan secara total.
