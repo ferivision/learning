@@ -16,7 +16,7 @@ Ini adalah bentuk paling sederhana dari "aplikasi AI" — satu backend yang jadi
 Client → Python Backend (FastAPI) → LLM API → Response
               │
               ├── LLMGateway.generate()  (Phase 5, topik 20)
-              └── trace_llm_call()       (Phase 15, topik 42 — logging/observability)
+              └── trace_llm_call()       (Phase 15, topik 59 — logging/observability)
 ```
 
 Implementation checklist:
@@ -27,7 +27,7 @@ Implementation checklist:
 - [ ] Error handling: request ke LLM provider yang gagal (timeout, rate limit, response error) gak boleh bikin seluruh endpoint crash — dibungkus try/except dan balikin error response yang jelas ke client.
 - [ ] Timeout eksplisit di panggilan LLM (jangan andalkan default library) supaya request yang macet gak nge-hang selamanya.
 - [ ] Rate limiting di sisi backend (per customer/per API key), biar satu client gak bisa menghabiskan quota buat semua orang.
-- [ ] Logging tiap panggilan LLM pakai `trace_llm_call` (Phase 15 topik 42) — input, output, latency, token count — supaya ada jejak buat debugging dan analisis biaya belakangan.
+- [ ] Logging tiap panggilan LLM pakai `trace_llm_call` (Phase 15 topik 59) — input, output, latency, token count — supaya ada jejak buat debugging dan analisis biaya belakangan.
 
 ---
 
